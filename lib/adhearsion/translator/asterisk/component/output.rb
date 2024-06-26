@@ -1,6 +1,5 @@
 # encoding: utf-8
 
-require 'ruby_speech'
 require 'active_support/core_ext/string/filters'
 require 'adhearsion/translator/asterisk/unimrcp_app'
 
@@ -32,7 +31,7 @@ module Adhearsion
 
             case rendering_engine.to_sym
             when :asterisk
-              validate_audio_only
+              validate_audio_or_number_only
               setup_for_native
 
               repeat_times.times do
@@ -120,9 +119,13 @@ module Adhearsion
             @call.send_progress if @early
           end
 
-          def validate_audio_only
+          # Validates if the input document contains only audio files, or numbers.  Raises UnrendernableDocError if the document isn't valid.
+          def validate_audio_or_number_only
             render_docs.each do |doc|
-              filenames doc, -> { raise UnrenderableDocError, 'The provided document could not be rendered. See http://adhearsion.com/docs/common_problems#unrenderable-document-error for details.' }
+              doc.value.children.each do |node|
+                next if RubySpeech::SSML::Audio === node || (RubySpeech::SSML::SayAs === node && all_numbers?(node.text) ) || (String === node && !node.include?(' '))
+                raise UnrenderableDocError, 'The provided document could not be rendered. When using Asterisk rendering the document must contain either numbers, or links to audio files. See http://adhearsion.com/docs/common_problems#unrenderable-document-error for details'
+              end
             end
           end
 
@@ -135,6 +138,29 @@ module Adhearsion
             else
               File.join(dir, basename)
             end
+          end
+
+          def play_doc_asterisk(doc)
+            doc.value.children.each do |node|
+              case node
+              when RubySpeech::SSML::Audio
+                playback([path_for_audio_node(node)]) || raise(PlaybackError)
+              when String
+                  playback([node])   || raise(PlaybackError)
+              when RubySpeech::SSML::SayAs
+                 if all_numbers?(node.text)
+                   say_number(node.text)
+                 else
+                   raise UnrenderableDocError, 'The provided document could not be rendered. When using Asterisk rendering the document must contain either numbers, or links to audio files. See http://adhearsion.com/docs/common_problems#unrenderable-document-error for details'
+                 end
+                else
+                 raise UnrenderableDocError, 'The provided document could not be rendered. When using Asterisk rendering the document must contain either numbers, or links to audio files. See http://adhearsion.com/docs/common_problems#unrenderable-document-error for details'
+              end
+            end
+          end
+         
+          def all_numbers?(input)
+            !!(/^[0-9]+$/ =~ input)
           end
 
           def filenames(doc, check_audio_only_policy = -> {})
@@ -165,6 +191,11 @@ module Adhearsion
             @call.channel_var('PLAYBACKSTATUS') != 'FAILED'
           end
 
+          def say_number(number)
+             return true if @stopped
+             @call.execute_agi_command 'EXEC SayNumber', number
+          end
+          
           def fallback_doc(original, failed_audio_node)
             children = failed_audio_node.nokogiri_children
             copied_doc original, children
